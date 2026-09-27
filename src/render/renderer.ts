@@ -1,4 +1,4 @@
-import { Application, Container, CullerPlugin, Graphics, Sprite, Text, extensions } from 'pixi.js';
+import { Application, Container, CullerPlugin, Graphics, Matrix, Rectangle, Sprite, Text, extensions } from 'pixi.js';
 
 extensions.add(CullerPlugin);
 import { F_ARRESTED, F_GLUED, F_SIT, F_STANCE_OFF, F_WORKING, SnapUnit, Snapshot } from '../sim/snapshot';
@@ -18,6 +18,25 @@ interface UnitView {
   texKey: string;
   barKey: string;
 }
+
+/** A quarter turn in progress: the old view (ghost) spins out while the new one spins in. */
+interface Spin {
+  ghost: Sprite;
+  step: number;
+  t: number;
+}
+
+const SPIN_MS = 380;
+
+/**
+ * Screen-space affine map that turns the isometric ground plane by `angle` around (cx, cy):
+ * un-squash the 2:1 projection, rotate, squash again. At ±90° it matches a quarter turn exactly.
+ */
+function isoSpin(angle: number, cx: number, cy: number): Matrix {
+  return new Matrix().translate(-cx, -cy).scale(1, 2).rotate(angle).scale(1, 0.5).translate(cx, cy);
+}
+
+const easeInOut = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2);
 
 interface Particle {
   s: Sprite;
@@ -45,6 +64,8 @@ function setTex(s: Sprite, t: Tex) {
 
 export class GameRenderer {
   app = new Application();
+  /** holds the camera; only transformed while a rotation animates */
+  spinner = new Container();
   camera = new Container();
   ground = new Container();
   overlay = new Graphics();
@@ -71,6 +92,7 @@ export class GameRenderer {
   private liveUntil = 0;
   private overlayBuilt = false;
   private moveMarker: { x: number; y: number; until: number } | null = null;
+  private spin: Spin | null = null;
 
   async init(parent: HTMLElement) {
     const low = new URLSearchParams(location.search).has('lowgfx');
@@ -89,7 +111,8 @@ export class GameRenderer {
     this.bank = new TextureBank(this.app.renderer as any);
     this.objects.sortableChildren = true;
     this.camera.addChild(this.ground, this.overlay, this.marker, this.objects, this.fog, this.fx);
-    this.app.stage.addChild(this.camera);
+    this.spinner.addChild(this.camera);
+    this.app.stage.addChild(this.spinner);
     this.app.ticker.add((t) => this.frame(t.deltaMS));
   }
 
@@ -378,7 +401,18 @@ export class GameRenderer {
   /** turn the map by a quarter turn (1 = clockwise, -1 = counter-clockwise), keeping the screen centre */
   rotate(step: number) {
     if (!this.map) return;
-    const c = this.screenToWorld(this.app.screen.width / 2, this.app.screen.height / 2);
+    this.endSpin();
+    const { width, height } = this.app.screen;
+    const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    if (!reduced) {
+      // freeze the current picture so it can spin away on top of the new view
+      const tex = this.app.renderer.generateTexture({ target: this.app.stage, frame: new Rectangle(0, 0, width, height) });
+      const ghost = new Sprite(tex);
+      this.app.stage.addChild(ghost);
+      this.spin = { ghost, step, t: 0 };
+      this.updateSpin(0);
+    }
+    const c = this.screenToWorld(width / 2, height / 2);
     this.rot = (this.rot + step + 4) & 3;
     this.drawStatic();
     this.overlayBuilt = false;
@@ -390,6 +424,26 @@ export class GameRenderer {
       this.updateFog(this.cur.vis);
     }
     this.centerOn(c.x, c.y);
+  }
+
+  private updateSpin(dtMs: number) {
+    const sp = this.spin;
+    if (!sp) return;
+    sp.t += dtMs;
+    if (sp.t >= SPIN_MS) return this.endSpin();
+    const e = easeInOut(sp.t / SPIN_MS);
+    const cx = this.app.screen.width / 2;
+    const cy = this.app.screen.height / 2;
+    sp.ghost.setFromMatrix(isoSpin((sp.step * e * Math.PI) / 2, cx, cy));
+    sp.ghost.alpha = 1 - e;
+    this.spinner.setFromMatrix(isoSpin((-sp.step * (1 - e) * Math.PI) / 2, cx, cy));
+  }
+
+  private endSpin() {
+    if (!this.spin) return;
+    this.spin.ghost.destroy({ texture: true, textureSource: true });
+    this.spin = null;
+    this.spinner.setFromMatrix(Matrix.IDENTITY);
   }
 
   centerOn(x: number, y: number) {
@@ -549,6 +603,7 @@ export class GameRenderer {
 
   frame(dtMs: number) {
     this.time += dtMs;
+    this.updateSpin(dtMs);
     const snap = this.cur;
     if (!snap || !this.map) return;
     const a = Math.min(1, (performance.now() - this.snapTime) / TICK_MS);

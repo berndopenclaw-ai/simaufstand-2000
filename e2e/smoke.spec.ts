@@ -99,6 +99,12 @@ test('map rotates by 90° with the toolbar buttons', async ({ page }) => {
   expect(v4.rot).toBe(0);
   expect(v4.tile.x).toBeCloseTo(v0.tile.x, 0);
   expect(v4.tile.y).toBeCloseTo(v0.tile.y, 0);
+  // the turn animation finishes and leaves no ghost image or transform behind
+  await page.waitForFunction(() => {
+    const r = (window as any).__sa.game.renderer;
+    const m = r.spinner.localTransform;
+    return !r.spin && r.app.stage.children.length === 1 && m.a === 1 && m.b === 0 && m.c === 0 && m.d === 1 && m.tx === 0 && m.ty === 0;
+  });
   expect(errors).toEqual([]);
 });
 
