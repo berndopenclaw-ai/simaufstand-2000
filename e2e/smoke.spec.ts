@@ -68,6 +68,40 @@ test('police: select units by dragging, move them with a right click', async ({ 
   expect(errors).toEqual([]);
 });
 
+test('map rotates by 90° with the toolbar buttons', async ({ page }) => {
+  const errors = collectErrors(page);
+  await startGame(page, 0);
+  const view = () =>
+    page.evaluate(() => {
+      const sa = (window as any).__sa;
+      const r = sa.game.renderer;
+      const tile = sa.tileScreen(20, 30);
+      const back = r.screenToWorld(tile.x, tile.y);
+      const mid = r.screenToWorld(r.app.screen.width / 2, r.app.screen.height / 2);
+      return { rot: r.rot, tile, back, mid };
+    });
+  const v0 = await view();
+  expect(v0.rot).toBe(0);
+  await page.click('#btn-rot-right');
+  const v1 = await view();
+  expect(v1.rot).toBe(1);
+  // the tile moved on screen, but screen <-> world still round-trips and the centre stays put
+  expect(Math.hypot(v1.tile.x - v0.tile.x, v1.tile.y - v0.tile.y)).toBeGreaterThan(20);
+  expect(v1.back.x).toBeCloseTo(20.5, 1);
+  expect(v1.back.y).toBeCloseTo(30.5, 1);
+  expect(v1.mid.x).toBeCloseTo(v0.mid.x, 0);
+  expect(v1.mid.y).toBeCloseTo(v0.mid.y, 0);
+  await page.click('#btn-rot-left');
+  await page.click('#btn-rot-left');
+  expect((await view()).rot).toBe(3);
+  await page.keyboard.press('.');
+  const v4 = await view();
+  expect(v4.rot).toBe(0);
+  expect(v4.tile.x).toBeCloseTo(v0.tile.x, 0);
+  expect(v4.tile.y).toBeCloseTo(v0.tile.y, 0);
+  expect(errors).toEqual([]);
+});
+
 test('police: requesting reinforcements costs funds', async ({ page }) => {
   await startGame(page, 0);
   const count = () => page.evaluate(() => (window as any).__sa.snapshot().units.filter((u: any) => u.s === 0).length);

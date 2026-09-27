@@ -112,6 +112,7 @@ export const T = {
     'Rechtsklick: Bewegen',
     'Pfeiltasten / mittlere Maustaste / Zwei-Finger-Wischen: Karte verschieben',
     'Mausrad / Zwei-Finger-Zoom / + −: Zoom',
+    '⟲ ⟳ / , .: Karte um 90° drehen',
     'Strg+1…9: Gruppe speichern · 1…9: Gruppe wählen',
     'Leertaste: Pause · M: Musik · Esc: Auswahl aufheben',
   ],

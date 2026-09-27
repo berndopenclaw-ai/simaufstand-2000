@@ -21,6 +21,7 @@ Oder die gebaute Version: `npm run build && npm run preview`.
 | Bewegen | Rechtsklick |
 | Karte verschieben | Pfeiltasten, mittlere Maustaste, Alt + Ziehen, Zwei-Finger-Wischen, Klick auf Stadtplan |
 | Zoom | Mausrad, Zwei-Finger-Zoom, `+` / `−` |
+| Karte drehen (90°) | Knöpfe ⟲ / ⟳ oben rechts, `,` / `.` |
 | Gruppen | `Strg+1…9` speichern, `1…9` wählen (2× = hinspringen) |
 | Fähigkeiten | `Q` Hinsetzen · `E` Festkleben · `R` Auto querstellen · `F` Auto anzünden · `G` Megafon · `T` Zugriff an/aus |
 | Sonstiges | `Leertaste` Pause · `M` Musik · `H` Hilfe · `Esc` Auswahl aufheben |
