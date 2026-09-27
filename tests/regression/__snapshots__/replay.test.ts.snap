@@ -1,0 +1,10 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`replay regression > matches the golden state hash 1`] = `
+{
+  "arrests": 12,
+  "hash": "afc8295b",
+  "progress": 27,
+  "tick": 900,
+}
+`;

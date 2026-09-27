@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SimAufstand 2000</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 1 15 5 8 9 1 5z' fill='%23e9c46a'/%3E%3Cpath d='M1 5v6l7 4V9z' fill='%23b08a3a'/%3E%3Cpath d='M15 5v6l-7 4V9z' fill='%23806025'/%3E%3C/svg%3E" />
+  </head>
+  <body>
+    <div id="app">
+      <div id="stage"></div>
+      <div id="selrect" hidden></div>
+
+      <!-- in-game HUD -->
+      <div id="hud" hidden>
+        <div id="topbar" class="panel">
+          <div class="logo">SimAufstand <span>2000</span></div>
+          <div class="field" id="hud-scenario"></div>
+          <div class="field"><label>Restzeit</label><b id="hud-time">--:--</b></div>
+          <div class="field"><label>Mittel</label><b id="hud-funds">0</b></div>
+          <div class="field opinion">
+            <label>Öffentliche Meinung</label>
+            <div class="opbar"><div id="hud-opmark"></div></div>
+            <div class="oplabels"><span>pro Polizei</span><span>pro Demo</span></div>
+          </div>
+          <div class="field objective">
+            <label id="hud-objlabel">Ziel</label>
+            <div class="progress"><div id="hud-objbar"></div></div>
+            <small id="hud-objtext"></small>
+          </div>
+          <div class="field"><label>Stau</label><b id="hud-jam">0</b></div>
+          <div class="buttons">
+            <button id="btn-pause" title="Pause (Leertaste)">❚❚</button>
+            <button id="btn-speed" title="Tempo">1×</button>
+            <button id="btn-music" title="Musik (M)">♫</button>
+            <button id="btn-help" title="Hilfe (H)">?</button>
+            <button id="btn-menu" title="Hauptmenü">Menü</button>
+          </div>
+        </div>
+        <div id="ticker"></div>
+        <div id="side" class="panel">
+          <div class="title">Stadtplan Neustadt</div>
+          <canvas id="minimap" width="200" height="104"></canvas>
+          <div class="title" id="buy-title">Verstärkung anfordern</div>
+          <div id="buy"></div>
+        </div>
+        <div id="bottom" class="panel">
+          <div id="sel-info"></div>
+          <div id="sel-abilities"></div>
+        </div>
+        <div id="helpbox" class="panel" hidden></div>
+        <div id="pausebanner" hidden>PAUSE</div>
+      </div>
+
+      <!-- main menu -->
+      <div id="menu" class="overlay">
+        <div class="window">
+          <div class="titlebar">SimAufstand 2000 – Hauptmenü</div>
+          <div class="menu-body">
+            <h1 class="big-logo">SimAufstand <span>2000</span></h1>
+            <p class="subtitle" id="menu-subtitle"></p>
+            <h3>Szenario wählen</h3>
+            <div id="scenarios"></div>
+            <div class="row">
+              <div>
+                <h3>Deine Seite</h3>
+                <div class="toggle" id="side-toggle">
+                  <button data-side="0" class="on">Polizei</button>
+                  <button data-side="1">Demonstranten</button>
+                </div>
+              </div>
+              <div>
+                <h3>Schwierigkeit</h3>
+                <div class="toggle" id="diff-toggle">
+                  <button data-diff="leicht">Leicht</button>
+                  <button data-diff="normal" class="on">Normal</button>
+                  <button data-diff="schwer">Schwer</button>
+                </div>
+              </div>
+              <div>
+                <h3>Musik</h3>
+                <div class="toggle" id="music-toggle">
+                  <button data-music="1" class="on">an</button>
+                  <button data-music="0">aus</button>
+                </div>
+              </div>
+            </div>
+            <p id="goal"></p>
+            <button id="start" class="primary">Einsatz beginnen</button>
+            <details>
+              <summary>Steuerung</summary>
+              <ul id="menu-help"></ul>
+            </details>
+            <p class="footer" id="menu-footer"></p>
+          </div>
+        </div>
+      </div>
+
+      <!-- end screen -->
+      <div id="end" class="overlay" hidden>
+        <div class="window">
+          <div class="titlebar" id="end-title">Ergebnis</div>
+          <div class="menu-body">
+            <h1 id="end-head"></h1>
+            <p id="end-reason"></p>
+            <h3>Bilanz</h3>
+            <table id="end-stats"></table>
+            <div class="row">
+              <button id="end-again" class="primary">Nochmal spielen</button>
+              <button id="end-menu">Hauptmenü</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
