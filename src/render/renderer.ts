@@ -1,11 +1,11 @@
-import { Application, Container, CullerPlugin, Graphics, Sprite, Text, extensions } from 'pixi.js';
+import { Application, Container, CullerPlugin, Graphics, Matrix, Rectangle, Sprite, Text, extensions } from 'pixi.js';
 
 extensions.add(CullerPlugin);
 import { F_ARRESTED, F_GLUED, F_SIT, F_STANCE_OFF, F_WORKING, SnapUnit, Snapshot } from '../sim/snapshot';
 import { District, Kind, PARKED_BURNING, PARKED_OK, STATS, Side, TICK_MS, Tile } from '../sim/types';
 import type { GameEvent } from '../sim/world';
 import type { MapPayload } from '../sim/worker';
-import { FLOOR_PX, HALF_H, HALF_W, isoQuad, isoToScreen, screenToIso } from './iso';
+import { FLOOR_PX, HALF_H, HALF_W, isoQuad, isoToScreen, rotate, rotateDir, screenToIso, unrotate } from './iso';
 import { CAR_COLORS, Tex, TextureBank } from './textures';
 
 interface UnitView {
@@ -18,6 +18,25 @@ interface UnitView {
   texKey: string;
   barKey: string;
 }
+
+/** A quarter turn in progress: the old view (ghost) spins out while the new one spins in. */
+interface Spin {
+  ghost: Sprite;
+  step: number;
+  t: number;
+}
+
+const SPIN_MS = 380;
+
+/**
+ * Screen-space affine map that turns the isometric ground plane by `angle` around (cx, cy):
+ * un-squash the 2:1 projection, rotate, squash again. At ±90° it matches a quarter turn exactly.
+ */
+function isoSpin(angle: number, cx: number, cy: number): Matrix {
+  return new Matrix().translate(-cx, -cy).scale(1, 2).rotate(angle).scale(1, 0.5).translate(cx, cy);
+}
+
+const easeInOut = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2);
 
 interface Particle {
   s: Sprite;
@@ -45,6 +64,8 @@ function setTex(s: Sprite, t: Tex) {
 
 export class GameRenderer {
   app = new Application();
+  /** holds the camera; only transformed while a rotation animates */
+  spinner = new Container();
   camera = new Container();
   ground = new Container();
   overlay = new Graphics();
@@ -56,6 +77,8 @@ export class GameRenderer {
   map: MapPayload | null = null;
   selected = new Set<number>();
   cur: Snapshot | null = null;
+  /** view rotation in quarter turns, clockwise */
+  rot = 0;
   private units = new Map<number, UnitView>();
   private cars = new Map<number, Sprite>();
   private parked = new Map<number, { s: Sprite; flame: Sprite; key: string }>();
@@ -69,6 +92,7 @@ export class GameRenderer {
   private liveUntil = 0;
   private overlayBuilt = false;
   private moveMarker: { x: number; y: number; until: number } | null = null;
+  private spin: Spin | null = null;
 
   async init(parent: HTMLElement) {
     const low = new URLSearchParams(location.search).has('lowgfx');
@@ -87,7 +111,8 @@ export class GameRenderer {
     this.bank = new TextureBank(this.app.renderer as any);
     this.objects.sortableChildren = true;
     this.camera.addChild(this.ground, this.overlay, this.marker, this.objects, this.fog, this.fx);
-    this.app.stage.addChild(this.camera);
+    this.spinner.addChild(this.camera);
+    this.app.stage.addChild(this.spinner);
     this.app.ticker.add((t) => this.frame(t.deltaMS));
   }
 
@@ -96,9 +121,8 @@ export class GameRenderer {
   buildMap(map: MapPayload) {
     this.map = map;
     this.overlayBuilt = false;
-    for (const c of [...this.ground.children]) c.destroy();
-    this.rows = [];
     for (const c of [...this.objects.children]) c.destroy({ children: true });
+    this.rows = [];
     this.units.clear();
     this.cars.clear();
     this.parked.clear();
@@ -108,7 +132,19 @@ export class GameRenderer {
     this.particles = [];
     this.visKey = '';
     this.cur = null;
+    this.drawStatic();
+    this.camera.scale.set(1);
+    this.centerOn(map.demoMeet.x, map.demoMeet.y);
+  }
+
+  /** ground, buildings and trees in the current view rotation */
+  private drawStatic() {
+    const map = this.map!;
+    for (const c of [...this.ground.children]) c.destroy();
+    for (const r of this.rows) r.destroy();
+    this.rows = [];
     const { w, h, tiles, variant } = map;
+    const [vw, vh] = this.rot & 1 ? [h, w] : [w, h];
     const at = (x: number, y: number) => (x < 0 || y < 0 || x >= w || y >= h ? -1 : tiles[y * w + x]);
     const CH = 16;
     const chunks = new Map<number, Graphics>();
@@ -124,7 +160,7 @@ export class GameRenderer {
       return c;
     };
     const backdrop = new Graphics();
-    backdrop.poly(isoQuad(-3, -3, w + 3, h + 3)).fill(0x3f5f2a);
+    backdrop.poly(this.quad(-3, -3, w + 3, h + 3)).fill(0x3f5f2a);
     this.ground.addChild(backdrop);
 
     for (let y = 0; y < h; y++) {
@@ -133,19 +169,19 @@ export class GameRenderer {
         const i = y * w + x;
         const t = tiles[i];
         const v = variant[i];
-        const q = isoQuad(x, y, x + 1, y + 1);
+        const q = this.quad(x, y, x + 1, y + 1);
         switch (t) {
           case Tile.Grass:
             g.poly(q).fill(v % 3 === 0 ? 0x5b8a38 : 0x62913e);
             break;
           case Tile.Park:
             g.poly(q).fill(v % 2 ? 0x4e8a30 : 0x548f35);
-            if (v % 7 === 0) g.poly(isoQuad(x + 0.4, y, x + 0.6, y + 1)).fill(0xc9b98f);
+            if (v % 7 === 0) g.poly(this.quad(x + 0.4, y, x + 0.6, y + 1)).fill(0xc9b98f);
             break;
           case Tile.Water:
             g.poly(q).fill(0x2e6aa3);
             if (v % 3 === 0) {
-              const c = isoToScreen(x + 0.3 + (v % 5) * 0.08, y + 0.5);
+              const c = this.proj(x + 0.3 + (v % 5) * 0.08, y + 0.5);
               g.moveTo(c.x - 6, c.y).lineTo(c.x + 4, c.y).stroke({ color: 0x7fb2e0, width: 1 });
             }
             break;
@@ -154,7 +190,7 @@ export class GameRenderer {
             break;
           case Tile.Parking:
             g.poly(q).fill(0x6e7277);
-            g.poly(isoQuad(x + 0.48, y + 0.05, x + 0.52, y + 0.95)).fill(0xeeeeee);
+            g.poly(this.quad(x + 0.48, y + 0.05, x + 0.52, y + 0.95)).fill(0xeeeeee);
             break;
           case Tile.Building:
             g.poly(q).fill(0x9a9a94);
@@ -164,12 +200,12 @@ export class GameRenderer {
             g.poly(q).fill(water ? 0x6b6f75 : 0x55595f);
             const ex = at(x - 1, y) === Tile.Road || at(x + 1, y) === Tile.Road;
             const ey = at(x, y - 1) === Tile.Road || at(x, y + 1) === Tile.Road;
-            if (ex && !ey) g.poly(isoQuad(x + 0.2, y + 0.47, x + 0.7, y + 0.53)).fill(0xf5f5f5);
-            else if (ey && !ex) g.poly(isoQuad(x + 0.47, y + 0.2, x + 0.53, y + 0.7)).fill(0xf5f5f5);
-            else for (let k = 0; k < 4; k++) g.poly(isoQuad(x + 0.12 + k * 0.2, y + 0.02, x + 0.22 + k * 0.2, y + 0.14)).fill(0xdddddd);
+            if (ex && !ey) g.poly(this.quad(x + 0.2, y + 0.47, x + 0.7, y + 0.53)).fill(0xf5f5f5);
+            else if (ey && !ex) g.poly(this.quad(x + 0.47, y + 0.2, x + 0.53, y + 0.7)).fill(0xf5f5f5);
+            else for (let k = 0; k < 4; k++) g.poly(this.quad(x + 0.12 + k * 0.2, y + 0.02, x + 0.22 + k * 0.2, y + 0.14)).fill(0xdddddd);
             if (water) {
-              g.poly(isoQuad(x, y, x + 0.06, y + 1)).fill(0xb0b0b0);
-              g.poly(isoQuad(x + 0.94, y, x + 1, y + 1)).fill(0xb0b0b0);
+              g.poly(this.quad(x, y, x + 0.06, y + 1)).fill(0xb0b0b0);
+              g.poly(this.quad(x + 0.94, y, x + 1, y + 1)).fill(0xb0b0b0);
             }
             break;
           }
@@ -177,17 +213,20 @@ export class GameRenderer {
       }
     }
     const g = chunk(34, 34);
-    const fc = isoToScreen(34.5, 34.5);
+    const fc = this.proj(34.5, 34.5);
     g.ellipse(fc.x, fc.y, 40, 20).fill(0xa89f88);
     g.ellipse(fc.x, fc.y, 34, 17).fill(0x3d86c6);
     g.ellipse(fc.x, fc.y - 2, 8, 4).fill(0xcfe8ff);
 
-    // buildings + trees: one Graphics per diagonal row for correct depth sorting
-    for (let d = 0; d <= w + h - 2; d++) {
+    // buildings + trees: one Graphics per diagonal row (in view coords) for correct depth sorting
+    for (let d = 0; d <= vw + vh - 2; d++) {
       let row: Graphics | null = null;
       let seg = -1;
-      for (let x = Math.max(0, d - h + 1); x <= Math.min(w - 1, d); x++) {
+      for (let x = Math.max(0, d - vh + 1); x <= Math.min(vw - 1, d); x++) {
         const y = d - x;
+        const wt = unrotate(x + 0.5, y + 0.5, this.rot, w, h);
+        const wx = wt.x - 0.5;
+        const wy = wt.y - 0.5;
         if (!row || Math.floor(x / 12) !== seg) {
           seg = Math.floor(x / 12);
           row = new Graphics();
@@ -196,23 +235,21 @@ export class GameRenderer {
           this.objects.addChild(row);
           this.rows.push(row);
         }
-        const i = y * w + x;
+        const i = wy * w + wx;
         const t = tiles[i];
-        if (t === Tile.Building) this.drawBuilding(row, x, y, map.height[i], map.district[i] as District, variant[i]);
+        if (t === Tile.Building) this.drawBuilding(row, x, y, map.height[i], map.district[i] as District, variant[i], wx + wy);
         else if (t === Tile.Park && variant[i] % 7 !== 0) this.drawTree(row, x, y, variant[i]);
         else if (t === Tile.Grass && variant[i] % 5 === 0) this.drawTree(row, x, y, variant[i]);
       }
     }
     for (const r of this.rows) if (r.context.instructions.length === 0) r.visible = false;
     const st = new Graphics();
-    const sc = isoToScreen(34.5, 34.5);
+    const sc = this.proj(34.5, 34.5);
     st.rect(sc.x - 3, sc.y - 22, 6, 18).fill(0x6f8f7f);
     st.circle(sc.x, sc.y - 25, 4).fill(0x6f8f7f);
-    st.zIndex = 69.2;
+    st.zIndex = this.depth(34.5, 34.5) + 0.2;
     this.objects.addChild(st);
-
-    this.camera.scale.set(1);
-    this.centerOn(map.demoMeet.x, map.demoMeet.y);
+    this.rows.push(st);
   }
 
   private drawTree(g: Graphics, x: number, y: number, v: number) {
@@ -229,7 +266,8 @@ export class GameRenderer {
     }
   }
 
-  private drawBuilding(g: Graphics, x: number, y: number, floors: number, d: District, v: number) {
+  /** x, y are view coords; k = world x + y, keeps the flag pattern stable under rotation */
+  private drawBuilding(g: Graphics, x: number, y: number, floors: number, d: District, v: number, k: number) {
     const ins = 0.07;
     const x0 = x + ins;
     const y0 = y + ins;
@@ -320,18 +358,96 @@ export class GameRenderer {
         const c = isoQuad(x0 + 0.2, y0 + 0.2, x0 + 0.32, y0 + 0.32, hp);
         g.rect(c[0] - 3, c[1] - 18, 6, 18).fill(0x7a4a3a);
       }
-      if (v === 250 && (x + y) % 3 === 0) {
+      if (v === 250 && k % 3 === 0) {
         const c = isoToScreen(x + 0.5, y + 0.5);
         g.rect(c.x, c.y - hp - 22, 1.2, 22).fill(0xdddddd);
-        g.rect(c.x + 1.2, c.y - hp - 22, 9, 6).fill([0xe63946, 0x2a9d8f, 0xf4a261][(x + y) % 3]);
+        g.rect(c.x + 1.2, c.y - hp - 22, 9, 6).fill([0xe63946, 0x2a9d8f, 0xf4a261][k % 3]);
       }
     }
   }
 
   // ------------------------------------------------------------------ camera
 
+  /** world tile coords -> view coords */
+  private toView(x: number, y: number) {
+    return this.map ? rotate(x, y, this.rot, this.map.w, this.map.h) : { x, y };
+  }
+
+  /** world tile coords -> screen pixels (before camera) */
+  private proj(x: number, y: number) {
+    const v = this.toView(x, y);
+    return isoToScreen(v.x, v.y);
+  }
+
+  /** screen pixels (before camera) -> world tile coords */
+  private unproj(sx: number, sy: number) {
+    const v = screenToIso(sx, sy);
+    return this.map ? unrotate(v.x, v.y, this.rot, this.map.w, this.map.h) : v;
+  }
+
+  /** isoQuad for a world-space rect */
+  private quad(x0: number, y0: number, x1: number, y1: number, h = 0): number[] {
+    const a = this.toView(x0, y0);
+    const b = this.toView(x1, y1);
+    return isoQuad(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.max(a.x, b.x), Math.max(a.y, b.y), h);
+  }
+
+  /** draw order of a world point (larger = in front) */
+  private depth(x: number, y: number) {
+    const v = this.toView(x, y);
+    return v.x + v.y;
+  }
+
+  /** turn the map by a quarter turn (1 = clockwise, -1 = counter-clockwise), keeping the screen centre */
+  rotate(step: number) {
+    if (!this.map) return;
+    this.endSpin();
+    const { width, height } = this.app.screen;
+    const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    if (!reduced) {
+      // freeze the current picture so it can spin away on top of the new view
+      const tex = this.app.renderer.generateTexture({ target: this.app.stage, frame: new Rectangle(0, 0, width, height) });
+      const ghost = new Sprite(tex);
+      this.app.stage.addChild(ghost);
+      this.spin = { ghost, step, t: 0 };
+      this.updateSpin(0);
+    }
+    const c = this.screenToWorld(width / 2, height / 2);
+    this.rot = (this.rot + step + 4) & 3;
+    this.drawStatic();
+    this.overlayBuilt = false;
+    this.visKey = '';
+    for (const p of this.particles) p.s.destroy();
+    this.particles = [];
+    if (this.cur) {
+      this.syncViews(this.cur);
+      this.updateFog(this.cur.vis);
+    }
+    this.centerOn(c.x, c.y);
+  }
+
+  private updateSpin(dtMs: number) {
+    const sp = this.spin;
+    if (!sp) return;
+    sp.t += dtMs;
+    if (sp.t >= SPIN_MS) return this.endSpin();
+    const e = easeInOut(sp.t / SPIN_MS);
+    const cx = this.app.screen.width / 2;
+    const cy = this.app.screen.height / 2;
+    sp.ghost.setFromMatrix(isoSpin((sp.step * e * Math.PI) / 2, cx, cy));
+    sp.ghost.alpha = 1 - e;
+    this.spinner.setFromMatrix(isoSpin((-sp.step * (1 - e) * Math.PI) / 2, cx, cy));
+  }
+
+  private endSpin() {
+    if (!this.spin) return;
+    this.spin.ghost.destroy({ texture: true, textureSource: true });
+    this.spin = null;
+    this.spinner.setFromMatrix(Matrix.IDENTITY);
+  }
+
   centerOn(x: number, y: number) {
-    const p = isoToScreen(x, y);
+    const p = this.proj(x, y);
     const s = this.camera.scale.x;
     this.camera.position.set(this.app.screen.width / 2 - p.x * s, this.app.screen.height / 2 - p.y * s);
   }
@@ -355,9 +471,10 @@ export class GameRenderer {
   private clampCamera() {
     if (!this.map) return;
     const s = this.camera.scale.x;
-    const minX = -this.map.w * HALF_W * s + this.app.screen.width * 0.5;
-    const maxX = this.map.w * HALF_W * s + this.app.screen.width * 0.5;
-    const minY = -(this.map.w + this.map.h) * HALF_H * s + this.app.screen.height * 0.5;
+    const [vw, vh] = this.rot & 1 ? [this.map.h, this.map.w] : [this.map.w, this.map.h];
+    const minX = -vw * HALF_W * s + this.app.screen.width * 0.5;
+    const maxX = vh * HALF_W * s + this.app.screen.width * 0.5;
+    const minY = -(vw + vh) * HALF_H * s + this.app.screen.height * 0.5;
     const maxY = this.app.screen.height * 0.5 + 60 * s;
     this.camera.position.x = Math.max(minX, Math.min(maxX, this.camera.position.x));
     this.camera.position.y = Math.max(minY, Math.min(maxY, this.camera.position.y));
@@ -365,11 +482,11 @@ export class GameRenderer {
 
   screenToWorld(sx: number, sy: number) {
     const s = this.camera.scale.x;
-    return screenToIso((sx - this.camera.position.x) / s, (sy - this.camera.position.y) / s);
+    return this.unproj((sx - this.camera.position.x) / s, (sy - this.camera.position.y) / s);
   }
 
   worldToScreen(x: number, y: number) {
-    const p = isoToScreen(x, y);
+    const p = this.proj(x, y);
     const s = this.camera.scale.x;
     return { x: p.x * s + this.camera.position.x, y: p.y * s + this.camera.position.y };
   }
@@ -378,7 +495,7 @@ export class GameRenderer {
   unitPos(id: number): { x: number; y: number } | null {
     const v = this.units.get(id);
     if (!v) return null;
-    return screenToIso(v.root.x, v.root.y);
+    return this.unproj(v.root.x, v.root.y);
   }
 
   visibleUnits(): SnapUnit[] {
@@ -443,16 +560,17 @@ export class GameRenderer {
         v = { s, flame, key: '' };
         this.parked.set(p.id, v);
       }
-      const key = `${p.st}-${p.x}-${p.y}`;
+      const key = `${p.st}-${p.x}-${p.y}-${this.rot}`;
       if (v.key !== key) {
         v.key = key;
-        setTex(v.s, this.bank.car(p.id % 2 === 0 ? 0 : 2, p.st === PARKED_OK ? 'ok' : 'wreck'));
+        setTex(v.s, this.bank.car(rotateDir(p.id % 2 === 0 ? 0 : 2, this.rot), p.st === PARKED_OK ? 'ok' : 'wreck'));
         v.s.tint = p.st === PARKED_OK ? CAR_COLORS[p.c % CAR_COLORS.length] : 0xffffff;
-        const pos = isoToScreen(p.x + 0.5, p.y + 0.5);
+        const pos = this.proj(p.x + 0.5, p.y + 0.5);
+        const z = this.depth(p.x + 0.5, p.y + 0.5);
         v.s.position.set(pos.x, pos.y);
-        v.s.zIndex = p.x + p.y + 1;
+        v.s.zIndex = z;
         v.flame.position.set(pos.x, pos.y - 6);
-        v.flame.zIndex = p.x + p.y + 1.01;
+        v.flame.zIndex = z + 0.01;
         v.flame.visible = p.st === PARKED_BURNING;
       }
     }
@@ -485,6 +603,7 @@ export class GameRenderer {
 
   frame(dtMs: number) {
     this.time += dtMs;
+    this.updateSpin(dtMs);
     const snap = this.cur;
     if (!snap || !this.map) return;
     const a = Math.min(1, (performance.now() - this.snapTime) / TICK_MS);
@@ -495,11 +614,12 @@ export class GameRenderer {
       const p = this.prev.get(u.id);
       const x = p && Math.abs(p.x - u.x) < 3 ? lerp(p.x, u.x, a) : u.x;
       const y = p && Math.abs(p.y - u.y) < 3 ? lerp(p.y, u.y, a) : u.y;
-      const s = isoToScreen(x, y);
+      const s = this.proj(x, y);
       v.root.position.set(s.x, s.y);
-      v.root.zIndex = x + y;
+      v.root.zIndex = this.depth(x, y);
       const vehicle = STATS[u.k].vehicle;
-      const dir = Math.abs(u.fx) > Math.abs(u.fy) ? (u.fx > 0 ? 0 : 1) : u.fy > 0 ? 2 : 3;
+      const f = rotate(u.fx, u.fy, this.rot, 0, 0);
+      const dir = Math.abs(f.x) > Math.abs(f.y) ? (f.x > 0 ? 0 : 1) : f.y > 0 ? 2 : 3;
       const pose = u.f & (F_SIT | F_GLUED | F_ARRESTED) ? 'sit' : 'stand';
       const key = `${u.k}-${pose}-${vehicle ? dir : 0}`;
       if (v.texKey !== key) {
@@ -508,7 +628,7 @@ export class GameRenderer {
         setTex(v.ring, vehicle ? this.bank.vehicleRing() : this.bank.ring());
       }
       if (!vehicle) {
-        const sdx = u.fx - u.fy;
+        const sdx = f.x - f.y;
         if (Math.abs(sdx) > 0.05) v.body.scale.x = sdx < 0 ? -1 : 1;
       }
       v.body.tint = u.f & F_ARRESTED ? 0x9a9a9a : u.f & F_STANCE_OFF ? 0xc8c8ff : 0xffffff;
@@ -545,10 +665,10 @@ export class GameRenderer {
       const p = this.prevCars.get(c.id);
       const x = p && Math.abs(p.x - c.x) < 1.5 ? lerp(p.x, c.x, a) : c.x;
       const y = p && Math.abs(p.y - c.y) < 1.5 ? lerp(p.y, c.y, a) : c.y;
-      const sp = isoToScreen(x, y);
+      const sp = this.proj(x, y);
       s.position.set(sp.x, sp.y);
-      s.zIndex = x + y;
-      const tex = this.bank.car(c.d);
+      s.zIndex = this.depth(x, y);
+      const tex = this.bank.car(rotateDir(c.d, this.rot));
       if (s.texture !== tex.tex) setTex(s, tex);
     }
 
@@ -589,20 +709,20 @@ export class GameRenderer {
     const obj = this.map.objective;
     if (obj.type === 'blockade') {
       for (const p of obj.points) {
-        o.poly(isoQuad(p.x - 1, p.y - 1, p.x + 2, p.y + 2)).fill({ color: 0xff8c00, alpha: 0.25 });
-        o.poly(isoQuad(p.x - 1, p.y - 1, p.x + 2, p.y + 2)).stroke({ color: 0xff8c00, width: 2, alpha: 0.9 });
+        o.poly(this.quad(p.x - 1, p.y - 1, p.x + 2, p.y + 2)).fill({ color: 0xff8c00, alpha: 0.25 });
+        o.poly(this.quad(p.x - 1, p.y - 1, p.x + 2, p.y + 2)).stroke({ color: 0xff8c00, width: 2, alpha: 0.9 });
       }
     } else {
       const r = obj.rect;
       const red = r.x0 === this.map.redZone.x0 && r.y0 === this.map.redZone.y0;
       const col = red ? 0xe63946 : 0xffd166;
-      o.poly(isoQuad(r.x0, r.y0, r.x1 + 1, r.y1 + 1)).fill({ color: col, alpha: 0.18 });
-      o.poly(isoQuad(r.x0, r.y0, r.x1 + 1, r.y1 + 1)).stroke({ color: col, width: 3, alpha: 0.9 });
+      o.poly(this.quad(r.x0, r.y0, r.x1 + 1, r.y1 + 1)).fill({ color: col, alpha: 0.18 });
+      o.poly(this.quad(r.x0, r.y0, r.x1 + 1, r.y1 + 1)).stroke({ color: col, width: 3, alpha: 0.9 });
     }
     const hq = this.map.policeHQ;
-    o.poly(isoQuad(hq.x, hq.y, hq.x + 1, hq.y + 1)).stroke({ color: 0x4d96ff, width: 2 });
+    o.poly(this.quad(hq.x, hq.y, hq.x + 1, hq.y + 1)).stroke({ color: 0x4d96ff, width: 2 });
     const dm = this.map.demoMeet;
-    o.poly(isoQuad(dm.x, dm.y, dm.x + 1, dm.y + 1)).stroke({ color: 0x7cfc00, width: 2 });
+    o.poly(this.quad(dm.x, dm.y, dm.x + 1, dm.y + 1)).stroke({ color: 0x7cfc00, width: 2 });
   }
 
   private drawMarker() {
@@ -615,7 +735,7 @@ export class GameRenderer {
       return;
     }
     const k = 1 - (m.until - this.time) / 600;
-    g.poly(isoQuad(m.x + k * 0.3, m.y + k * 0.3, m.x + 1 - k * 0.3, m.y + 1 - k * 0.3)).stroke({ color: 0x7cfc00, width: 2, alpha: 1 - k });
+    g.poly(this.quad(m.x + k * 0.3, m.y + k * 0.3, m.x + 1 - k * 0.3, m.y + 1 - k * 0.3)).stroke({ color: 0x7cfc00, width: 2, alpha: 1 - k });
   }
 
   markMove(x: number, y: number) {
@@ -642,7 +762,7 @@ export class GameRenderer {
         }
         const start = x;
         while (x < w && !vis[y * w + x]) x++;
-        f.poly(isoQuad(start, y, x, y + 1));
+        f.poly(this.quad(start, y, x, y + 1));
         any = true;
       }
     }
@@ -662,12 +782,12 @@ export class GameRenderer {
   }
 
   private popIcon(tex: Tex, x: number, y: number) {
-    const p = isoToScreen(x, y);
+    const p = this.proj(x, y);
     this.emit(tex, p.x, p.y - 36, 0, -0.25, 1200, 0, true);
   }
 
   floatText(text: string, x: number, y: number, color = 0xffffff) {
-    const p = isoToScreen(x, y);
+    const p = this.proj(x, y);
     const t = new Text({ text, style: { fontFamily: 'monospace', fontSize: 11, fill: color, stroke: { color: 0x000000, width: 3 } } });
     t.anchor.set(0.5);
     t.position.set(p.x, p.y - 44);
@@ -679,8 +799,8 @@ export class GameRenderer {
     for (const e of events) {
       switch (e.k) {
         case 'spray': {
-          const a = isoToScreen(e.x, e.y);
-          const b = isoToScreen(e.x2 ?? e.x, e.y2 ?? e.y);
+          const a = this.proj(e.x, e.y);
+          const b = this.proj(e.x2 ?? e.x, e.y2 ?? e.y);
           for (let i = 0; i < 36; i++) {
             const t = 350 + Math.random() * 250;
             const vx = ((b.x - a.x) / t) * 16.6 + (Math.random() - 0.5) * 0.6;
@@ -702,12 +822,12 @@ export class GameRenderer {
           this.popIcon(this.bank.icon('plus'), e.x, e.y);
           break;
         case 'megaphone': {
-          const p = isoToScreen(e.x, e.y);
+          const p = this.proj(e.x, e.y);
           for (let i = 0; i < 3; i++) this.emit(this.bank.icon('note'), p.x + (i - 1) * 8, p.y - 30, (i - 1) * 0.3, -0.6, 1400);
           break;
         }
         case 'fire': {
-          const p = isoToScreen(e.x, e.y);
+          const p = this.proj(e.x, e.y);
           for (let i = 0; i < 12; i++) this.emit(this.bank.puff(), p.x, p.y - 10, (Math.random() - 0.5) * 1.5, -Math.random() * 1.5, 1200, 0.02);
           break;
         }

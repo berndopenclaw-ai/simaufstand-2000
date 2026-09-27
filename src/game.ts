@@ -216,10 +216,19 @@ export class Game {
       this.audio.click();
     };
     $('btn-music').onclick = () => this.setMusic(!this.audio.musicOn);
+    $('btn-rot-left').onclick = () => this.rotateView(-1);
+    $('btn-rot-right').onclick = () => this.rotateView(1);
     $('btn-help').onclick = () => this.toggleHelp();
     $('btn-menu').onclick = () => this.startAttract();
     $('helpbox').innerHTML = `<div class="title">${T.menu.help}</div><ul>${T.help.map((h) => `<li>${h}</li>`).join('')}</ul>`;
     $('helpbox').onclick = () => this.toggleHelp();
+  }
+
+  private rotateView(step: number) {
+    this.renderer.rotate(step);
+    this.minimap.setRotation(this.renderer.rot);
+    if (this.snap) this.updateHud(this.snap);
+    this.audio.click();
   }
 
   private toggleHelp() {
@@ -541,6 +550,8 @@ export class Game {
         this.togglePause();
       } else if (k === 'm' || k === 'M') this.setMusic(!this.audio.musicOn);
       else if (k === 'h' || k === 'H') this.toggleHelp();
+      else if (k === ',') this.rotateView(-1);
+      else if (k === '.') this.rotateView(1);
       else if (k === 'Escape') {
         this.renderer.selected.clear();
         $('helpbox').hidden = true;

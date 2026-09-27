@@ -1,6 +1,7 @@
 import type { Snapshot } from '../sim/snapshot';
 import { Side, Tile } from '../sim/types';
 import type { MapPayload } from '../sim/worker';
+import { rotate, unrotate } from '../render/iso';
 
 const SX = 1.5;
 const SY = 0.78;
@@ -36,6 +37,7 @@ export class Minimap {
   private base: Uint32Array;
   private tilePx: Int32Array = new Int32Array(0); // first pixel index of each tile's 2x2 block
   private map: MapPayload | null = null;
+  private rot = 0;
   onJump: (x: number, y: number) => void = () => {};
   private dragging = false;
   private W: number;
@@ -65,17 +67,32 @@ export class Minimap {
   }
 
   private offX() {
-    return this.map ? this.map.h * SX + 4 : 0;
+    if (!this.map) return 0;
+    return (this.rot & 1 ? this.map.w : this.map.h) * SX + 4;
+  }
+
+  /** view coords -> minimap pixels */
+  private project(vx: number, vy: number) {
+    return { x: (vx - vy) * SX + this.offX(), y: (vx + vy) * SY + 2 };
   }
 
   toMini(x: number, y: number) {
-    return { x: (x - y) * SX + this.offX(), y: (x + y) * SY + 2 };
+    const v = this.map ? rotate(x, y, this.rot, this.map.w, this.map.h) : { x, y };
+    return this.project(v.x, v.y);
   }
 
   toWorld(mx: number, my: number) {
     const a = (mx - this.offX()) / SX;
     const b = (my - 2) / SY;
-    return { x: (a + b) / 2, y: (b - a) / 2 };
+    const v = { x: (a + b) / 2, y: (b - a) / 2 };
+    return this.map ? unrotate(v.x, v.y, this.rot, this.map.w, this.map.h) : v;
+  }
+
+  /** follow the main view's rotation (quarter turns, clockwise) */
+  setRotation(r: number) {
+    if (r === this.rot) return;
+    this.rot = r;
+    if (this.map) this.setMap(this.map);
   }
 
   setMap(map: MapPayload) {
@@ -84,7 +101,9 @@ export class Minimap {
     this.tilePx = new Int32Array(map.w * map.h).fill(-1);
     for (let y = 0; y < map.h; y++)
       for (let x = 0; x < map.w; x++) {
-        const p = this.toMini(x, y);
+        // top corner of the tile in view coords
+        const v = rotate(x + 0.5, y + 0.5, this.rot, map.w, map.h);
+        const p = this.project(v.x - 0.5, v.y - 0.5);
         const px = Math.round(p.x);
         const py = Math.round(p.y);
         if (px < 0 || py < 0 || px + 1 >= this.W || py + 1 >= this.H) continue;
